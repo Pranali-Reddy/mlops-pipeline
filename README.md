@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # MLOps Pipeline for Augmented Model Deployment
 
 An end-to-end, cloud-agnostic MLOps pipeline: data preprocessing, augmentation,
@@ -122,4 +122,3 @@ and `slides/` for a presentation-ready overview.
 =======
 # mlops-pipeline
 MLOps Pipeline for Augmented Machine Learning Model Deployment
->>>>>>> 00b113314d3f0e25c42a6445e61aef694432dd18

@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  # Tracking server + model registry backend
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.1
+    container_name: mlflow-server
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    healthcheck:
+         test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\" 2>/dev/null || python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
+         interval: 10s
+         timeout: 5s
+         retries: 8
+         start_period: 30s
+
+  # One-shot training job: preprocess -> train -> register -> promote
+  train:
+    build:
+      context: .
+      target: train
+    container_name: mlops-train
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT_NAME: wine-classifier
+      REGISTERED_MODEL_NAME: wine-classifier-prod
+      AUGMENT_FACTOR: "2"
+      NOISE_STD: "0.03"
+    volumes:
+      - ./data:/app/data
+
+  # Long-running serving API
+  serve:
+    build:
+      context: .
+      target: serve
+    container_name: mlops-serve
+    depends_on:
+      - train
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      REGISTERED_MODEL_NAME: wine-classifier-prod
+      MODEL_STAGE: Production
+      SCALER_PATH: /app/data/processed/scaler.joblib
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # Metrics scraping (optional, for local observability demo)
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: mlops-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - serve
+
+volumes:
+  mlflow_data:

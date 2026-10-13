@@ -1,0 +1,139 @@
+name: MLOps CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ---------- 1. Lint + unit test every push/PR ----------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint (flake8)
+        run: |
+          pip install flake8
+          flake8 src --max-line-length=110 --extend-ignore=E203
+
+      - name: Run unit tests
+        run: pytest tests/ -v --junitxml=test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+
+  # ---------- 2. Build & push train/serve images (main branch only) ----------
+  build-and-push:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push training image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: train
+          push: true
+          tags: |
+            ${{ env.IMAGE_REGISTRY }}/mlops-pipeline:train-${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_REGISTRY }}/mlops-pipeline:train-latest
+
+      - name: Build & push serving image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: serve
+          push: true
+          tags: |
+            ${{ env.IMAGE_REGISTRY }}/mlops-pipeline:serve-${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_REGISTRY }}/mlops-pipeline:serve-latest
+
+  # ---------- 3. Run training job on the cluster, register + promote model ----------
+  train-and-register:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > $HOME/kubeconfig
+        env:
+          KUBECONFIG: $HOME/kubeconfig
+
+      - name: Apply training Job
+        run: |
+          export KUBECONFIG=$HOME/kubeconfig
+          sed -e "s|\${IMAGE_REGISTRY}|${{ env.IMAGE_REGISTRY }}|g" \
+              -e "s|\${IMAGE_TAG}|${{ env.IMAGE_TAG }}|g" \
+              k8s/02-training-job.yaml > /tmp/training-job.yaml
+          kubectl delete job model-training -n mlops --ignore-not-found
+          kubectl apply -f /tmp/training-job.yaml
+          kubectl wait --for=condition=complete job/model-training -n mlops --timeout=600s
+
+  # ---------- 4. Roll out the new serving image (only if training succeeded) ----------
+  deploy:
+    needs: train-and-register
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        run: echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > $HOME/kubeconfig
+        env:
+          KUBECONFIG: $HOME/kubeconfig
+
+      - name: Apply manifests & roll out
+        run: |
+          export KUBECONFIG=$HOME/kubeconfig
+          for f in k8s/00-namespace.yaml k8s/01-mlflow.yaml k8s/04-ingress.yaml k8s/05-retrain-cronjob.yaml; do
+            kubectl apply -f "$f"
+          done
+          sed -e "s|\${IMAGE_REGISTRY}|${{ env.IMAGE_REGISTRY }}|g" \
+              -e "s|\${IMAGE_TAG}|${{ env.IMAGE_TAG }}|g" \
+              k8s/03-serving-deployment.yaml > /tmp/serving-deployment.yaml
+          kubectl apply -f /tmp/serving-deployment.yaml
+          kubectl rollout status deployment/model-serving -n mlops --timeout=300s
+
+      - name: Smoke test the deployed API
+        run: |
+          export KUBECONFIG=$HOME/kubeconfig
+          kubectl run smoke-test --rm -i --restart=Never --image=curlimages/curl -n mlops -- \
+            curl -sf http://model-serving/health

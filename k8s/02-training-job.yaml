@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-training
+  namespace: mlops
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: train
+          image: mlops-pipeline-train:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow-server:5000"
+            - name: MLFLOW_EXPERIMENT_NAME
+              value: "wine-classifier"
+            - name: REGISTERED_MODEL_NAME
+              value: "wine-classifier-prod"
+            - name: AUGMENT_FACTOR
+              value: "2"
+            - name: NOISE_STD
+              value: "0.03"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"

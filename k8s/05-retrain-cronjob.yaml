@@ -1,0 +1,34 @@
+# Scheduled retraining, e.g. weekly, so the model keeps up with data drift.
+# For drift-triggered (rather than time-triggered) retraining, pair this
+# with a monitoring rule that calls the K8s API to create a Job on demand.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scheduled-retrain
+  namespace: mlops
+spec:
+  schedule: "0 3 * * 0"  # 03:00 every Sunday
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: train
+              image: ${IMAGE_REGISTRY}/mlops-pipeline:train-latest
+              env:
+                - name: MLFLOW_TRACKING_URI
+                  value: "http://mlflow-server:5000"
+                - name: MLFLOW_EXPERIMENT_NAME
+                  value: "wine-classifier"
+                - name: REGISTERED_MODEL_NAME
+                  value: "wine-classifier-prod"
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: "512Mi"
+                limits:
+                  cpu: "2"
+                  memory: "2Gi"
